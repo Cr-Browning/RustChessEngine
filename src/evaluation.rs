@@ -118,6 +118,11 @@ impl Evaluation {
         let mut score = 0;
         
         for piece in &self.position.pieces {
+            // Skip captured pieces
+            if piece.position == 0 {
+                continue;
+            }
+
             let piece_value = match piece.piece_type {
                 PieceType::Pawn => PAWN_VALUE,
                 PieceType::Knight => KNIGHT_VALUE,
@@ -146,6 +151,11 @@ impl Evaluation {
         let mut black_pawns = 0u64;
         
         for piece in &self.position.pieces {
+            // Skip captured pieces
+            if piece.position == 0 {
+                continue;
+            }
+
             if piece.piece_type == PieceType::Pawn {
                 if piece.color == Color::White {
                     white_pawns |= piece.position;

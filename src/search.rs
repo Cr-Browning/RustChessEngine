@@ -3,12 +3,16 @@ use crate::evaluation::Evaluation;
 use crate::Game;
 use std::time::{Instant, Duration};
 use crate::moveorder::MoveOrderer;
+use crate::position::Square;
+use crate::utils::bit_scan_safe;
+use crate::transposition::{TranspositionTable, NodeType};
 
 const MAX_SCORE: i32 = 100000;
 const MIN_SCORE: i32 = -100000;
 const MATE_SCORE: i32 = 99000;
 const MAX_DEPTH: i32 = 4;  // Reduced from 6 to 4 to prevent stack overflow
 const MAX_QUIESCENCE_DEPTH: i32 = 4;  // Add a limit to quiescence search depth
+const TT_SIZE: usize = 32;  // 32MB transposition table
 
 #[derive(Clone)]
 pub struct Search {
@@ -17,6 +21,7 @@ pub struct Search {
     max_time: Duration,
     game: Game,
     move_orderer: MoveOrderer,
+    tt: TranspositionTable,
 }
 
 impl Search {
@@ -27,6 +32,7 @@ impl Search {
             max_time: Duration::from_secs(5),
             game: Game::new(),
             move_orderer: MoveOrderer::new(),
+            tt: TranspositionTable::new(TT_SIZE),
         }
     }
 
@@ -38,6 +44,7 @@ impl Search {
     pub fn find_best_move(&mut self, position: &mut Position) -> Option<u64> {
         self.nodes_searched = 0;
         self.start_time = Instant::now();
+        self.tt.new_search();  // Update age for new search
         
         let mut alpha = MIN_SCORE;
         let beta = MAX_SCORE;
@@ -46,7 +53,26 @@ impl Search {
 
         position.update_all_legal_moves(&self.game);
         let moves = position.get_all_legal_moves(&self.game);
-        let ordered_moves = self.move_orderer.order_moves(position, &moves, &self.game);
+        
+        // Skip pieces that have been captured (position == 0)
+        let valid_moves: Vec<u64> = moves.into_iter()
+            .filter(|&mov| {
+                let from_square = mov & 0x3F;
+                match position.squares[from_square as usize] {
+                    Square::Empty => false,
+                    Square::Occupied(idx) => {
+                        let piece = &position.pieces[idx];
+                        piece.position != 0
+                    }
+                }
+            })
+            .collect();
+
+        if valid_moves.is_empty() {
+            return None;
+        }
+
+        let ordered_moves = self.move_orderer.order_moves(position, &valid_moves, &self.game);
 
         // Start with a shallower depth and gradually increase
         for depth in 1..=MAX_DEPTH {
@@ -58,12 +84,13 @@ impl Search {
             for &mov in &ordered_moves {
                 let mut new_position = position.clone();
                 new_position.make_move(mov);
+                new_position.update_all_legal_moves(&self.game);
 
                 let score = -self.alpha_beta(
                     -beta,
                     -current_alpha,
                     depth - 1,
-                    0,  // Current depth from root
+                    0,
                     &mut new_position
                 );
 
@@ -85,10 +112,9 @@ impl Search {
         mut alpha: i32,
         beta: i32,
         depth: i32,
-        ply_from_root: i32,  // Add ply from root to prevent deep recursion
+        ply_from_root: i32,
         position: &mut Position
     ) -> i32 {
-        // Check for maximum recursion depth
         if ply_from_root >= MAX_DEPTH * 2 {
             return self.evaluate_position(position);
         }
@@ -99,24 +125,52 @@ impl Search {
             return 0;
         }
 
+        // Probe transposition table
+        let hash = position.get_hash(&self.game);
+        if let Some(entry) = self.tt.probe(hash) {
+            if entry.depth >= depth {
+                match entry.flag {
+                    NodeType::Exact => return entry.value,
+                    NodeType::Alpha if entry.value <= alpha => return alpha,
+                    NodeType::Beta if entry.value >= beta => return beta,
+                    _ => {}
+                }
+            }
+        }
+
         if depth <= 0 {
             return self.quiescence(alpha, beta, 0, position);
         }
 
         position.update_all_legal_moves(&self.game);
         let moves = position.get_all_legal_moves(&self.game);
-        let ordered_moves = self.move_orderer.order_moves(position, &moves, &self.game);
+        
+        // Filter valid moves
+        let valid_moves: Vec<u64> = moves.into_iter()
+            .filter(|&mov| {
+                let from_square = mov & 0x3F;
+                match position.squares[from_square as usize] {
+                    Square::Empty => false,
+                    Square::Occupied(idx) => position.pieces[idx].position != 0
+                }
+            })
+            .collect();
 
-        if moves.is_empty() {
-            if position.is_in_check() {
+        if valid_moves.is_empty() {
+            if position.is_in_check(&self.game) {
                 return MIN_SCORE + ply_from_root; // Prefer faster mate
             }
             return 0; // Stalemate
         }
 
+        let ordered_moves = self.move_orderer.order_moves(position, &valid_moves, &self.game);
+        let mut best_move = None;
+        let old_alpha = alpha;
+
         for &mov in &ordered_moves {
             let mut new_position = position.clone();
             new_position.make_move(mov);
+            new_position.update_all_legal_moves(&self.game);
 
             let score = -self.alpha_beta(
                 -beta,
@@ -127,10 +181,23 @@ impl Search {
             );
 
             if score >= beta {
+                // Store beta cutoff in transposition table
+                self.tt.store(hash, depth, NodeType::Beta, beta, Some(mov));
                 return beta;
             }
-            alpha = alpha.max(score);
+            if score > alpha {
+                alpha = score;
+                best_move = Some(mov);
+            }
         }
+
+        // Store position in transposition table
+        let node_type = if alpha > old_alpha {
+            NodeType::Exact
+        } else {
+            NodeType::Alpha
+        };
+        self.tt.store(hash, depth, node_type, alpha, best_move);
 
         alpha
     }
@@ -190,6 +257,7 @@ impl Search {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Game;
 
     #[test]
     fn test_mate_in_one() {
@@ -200,6 +268,9 @@ mod tests {
         );
         let mut search = Search::new();
         search.set_max_time(1); // Limit search time to 1 second
+        
+        // Update legal moves before searching
+        position.update_all_legal_moves(&game);
         let best_move = search.find_best_move(&mut position);
         assert!(best_move.is_some());
     }
@@ -213,8 +284,17 @@ mod tests {
         );
         let mut search = Search::new();
         search.set_max_time(1);
+        
+        // Update legal moves before searching
+        position.update_all_legal_moves(&game);
         let best_move = search.find_best_move(&mut position);
         assert!(best_move.is_some());
+        
+        // Verify the move is a capture
+        if let Some(mov) = best_move {
+            let to_square = (mov >> 6) & 0x3F;
+            assert!(position.squares[to_square as usize] != Square::Empty);
+        }
     }
 
     #[test]
@@ -226,6 +306,9 @@ mod tests {
         );
         let mut search = Search::new();
         search.set_max_time(1);
+        
+        // Update legal moves before searching
+        position.update_all_legal_moves(&game);
         let best_move = search.find_best_move(&mut position);
         assert!(best_move.is_some());
     }
@@ -236,6 +319,9 @@ mod tests {
         let mut position = Position::new(&game);
         let mut search = Search::new();
         search.set_max_time(1);
+        
+        // Update legal moves before searching
+        position.update_all_legal_moves(&game);
         let best_move = search.find_best_move(&mut position);
         assert!(best_move.is_some());
         assert!(search.nodes_searched > 0);

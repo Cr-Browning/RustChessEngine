@@ -17,6 +17,9 @@ pub mod evaluation;
 pub mod search;
 pub mod ui;
 pub mod gui;
+pub mod zorbrist;
+pub mod transposition;
+pub mod chess_move;
 use position::*;
 use knightattacks::KnightAttacks;
 use pawnattacks::PawnAttacks;
@@ -24,6 +27,8 @@ use rayattacks::Rays;
 use movegen_tables::MoveGenTables;
 use perft::Perft;
 use gui::run_gui;
+use ui::ChessUI;
+use zorbrist::Zobrist;
 
 /// The main game structure that holds the current position and pre-computed tables.
 /// 
@@ -42,6 +47,8 @@ pub struct Game {
     rays: Rays,
     /// Pre-computed move generation tables
     move_gen_tables: MoveGenTables,
+    /// Zobrist hashing for positions
+    pub zobrist: Zobrist,
 }
 
 impl Game {
@@ -81,6 +88,7 @@ impl Game {
             move_gen_tables: MoveGenTables::new(),
             pawn_attacks: PawnAttacks::new(),
             knight_attacks: KnightAttacks::new(),
+            zobrist: Zobrist::new(),
         };
 
         Game {
@@ -89,6 +97,7 @@ impl Game {
             move_gen_tables: MoveGenTables::new(),
             pawn_attacks: PawnAttacks::new(),
             knight_attacks: KnightAttacks::new(),
+            zobrist: Zobrist::new(),
         }
     }
 
@@ -112,6 +121,7 @@ impl Game {
             move_gen_tables: MoveGenTables::new(),
             pawn_attacks: PawnAttacks::new(),
             knight_attacks: KnightAttacks::new(),
+            zobrist: Zobrist::new(),
         }
     }
 
@@ -124,6 +134,7 @@ impl Game {
             move_gen_tables: MoveGenTables::new(),
             pawn_attacks: PawnAttacks::new(),
             knight_attacks: KnightAttacks::new(),
+            zobrist: Zobrist::new(),
         }
     }
 
@@ -136,7 +147,6 @@ impl Game {
 }
 
 fn main() {
-    if let Err(e) = run_gui() {
-        eprintln!("Error running GUI: {}", e);
-    }
+    let mut ui = ChessUI::new();
+    ui.play_game();
 }

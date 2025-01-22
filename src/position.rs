@@ -68,7 +68,7 @@ pub enum Color {
 }
 use Color::*;
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PieceType {
     Pawn,
     Rook,
@@ -104,7 +104,7 @@ impl Piece {
     }
 }   
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Square {
     Empty,
     Occupied(usize),
@@ -603,60 +603,99 @@ impl Position {
 
     /// Make a move on the board and return the new position
     pub fn make_move(&mut self, mov: u64) {
-        // Extract from and to squares
         let from_square = mov & 0x3F;
         let to_square = (mov >> 6) & 0x3F;
         let from_bitboard = 1u64 << from_square;
         let to_bitboard = 1u64 << to_square;
-        
+
         // Find the piece being moved
-        let piece_idx = match self.squares[from_square as usize] {
-            Square::Empty => return, // Invalid move
-            Square::Occupied(idx) => idx,
-        };
-        
-        // Update piece position
-        self.pieces[piece_idx].position = to_bitboard;
-        
-        // Update squares array
-        self.squares[from_square as usize] = Square::Empty;
-        self.squares[to_square as usize] = Square::Occupied(piece_idx);
-        
-        // Update occupancy bitboards
-        if self.active_color == Color::White {
-            self.white_occupancy &= !from_bitboard;
-            self.white_occupancy |= to_bitboard;
-            // If capturing a black piece
-            if self.black_occupancy & to_bitboard != 0 {
-                self.black_occupancy &= !to_bitboard;
+        if let Some(piece_idx) = self.pieces.iter().position(|p| p.position != 0 && p.position == from_bitboard) {
+            // Handle capture if there is one
+            if let Square::Occupied(captured_idx) = self.squares[to_square as usize] {
+                // Remove the captured piece from the appropriate occupancy bitboard
+                match self.pieces[captured_idx].color {
+                    Color::White => self.white_occupancy &= !to_bitboard,
+                    Color::Black => self.black_occupancy &= !to_bitboard,
+                }
+                // Mark the captured piece as captured by setting its position to 0
+                self.pieces[captured_idx].position = 0;
             }
-        } else {
-            self.black_occupancy &= !from_bitboard;
-            self.black_occupancy |= to_bitboard;
-            // If capturing a white piece
-            if self.white_occupancy & to_bitboard != 0 {
-                self.white_occupancy &= !to_bitboard;
+
+            // Update piece position
+            self.pieces[piece_idx].position = to_bitboard;
+
+            // Update squares
+            self.squares[from_square as usize] = Square::Empty;
+            self.squares[to_square as usize] = Square::Occupied(piece_idx);
+
+            // Update occupancy bitboards
+            match self.pieces[piece_idx].color {
+                Color::White => {
+                    self.white_occupancy &= !from_bitboard;
+                    self.white_occupancy |= to_bitboard;
+                },
+                Color::Black => {
+                    self.black_occupancy &= !from_bitboard;
+                    self.black_occupancy |= to_bitboard;
+                }
             }
+
+            // Handle promotions
+            if mov & (1 << 12) != 0 {
+                // Promote to queen
+                self.pieces[piece_idx].piece_type = PieceType::Queen;
+            }
+
+            // Switch active color
+            self.active_color = match self.active_color {
+                Color::White => Color::Black,
+                Color::Black => Color::White,
+            };
         }
-        
-        // Handle promotions
-        if mov & (1 << 12) != 0 {
-            // Promote to queen
-            self.pieces[piece_idx].piece_type = PieceType::Queen;
-        }
-        
-        // Switch active color
-        self.active_color = if self.active_color == Color::White {
-            Color::Black
-        } else {
-            Color::White
-        };
     }
 
     /// Check if the current side to move is in check
-    pub fn is_in_check(&self) -> bool {
-        // TODO: Implement actual check detection
-        // For now, return false as a placeholder
+    pub fn is_in_check(&self, game: &Game) -> bool {
+        // Find the king of the current side
+        let king = self.pieces.iter().find(|p| {
+            p.piece_type == PieceType::King && p.color == self.active_color
+        });
+
+        if let Some(king) = king {
+            let king_square = bit_scan(king.position);
+            let opponent_color = if self.active_color == Color::White { Color::Black } else { Color::White };
+            
+            // Check for attacks from opponent's pieces
+            for piece in self.pieces.iter().filter(|p| p.color == opponent_color) {
+                let piece_square = bit_scan(piece.position);
+                let all_occupancy = self.white_occupancy | self.black_occupancy;
+                
+                // Calculate attack squares based on piece type
+                let attacks = match piece.piece_type {
+                    PieceType::Pawn => {
+                        if piece.color == Color::White {
+                            game.pawn_attacks.white_diagonal_moves[piece_square]
+                        } else {
+                            game.pawn_attacks.black_diagonal_moves[piece_square]
+                        }
+                    },
+                    PieceType::Knight => game.move_gen_tables.knight_attacks[piece_square],
+                    PieceType::Bishop => game.rays.get_bishop_attacks(piece_square, all_occupancy),
+                    PieceType::Rook => game.rays.get_rook_attacks(piece_square, all_occupancy),
+                    PieceType::Queen => {
+                        game.rays.get_bishop_attacks(piece_square, all_occupancy) | 
+                        game.rays.get_rook_attacks(piece_square, all_occupancy)
+                    },
+                    PieceType::King => game.move_gen_tables.king_attacks[piece_square],
+                };
+                
+                // If the king's square is in the attack set, it's in check
+                if (attacks & king.position) != 0 {
+                    return true;
+                }
+            }
+        }
+        
         false
     }
 
@@ -676,7 +715,9 @@ impl Position {
     }
 
     pub fn get_piece_type_at(&self, square: u64) -> Option<PieceType> {
-        self.get_piece_at(square)
+        self.pieces.iter()
+            .find(|p| p.position == square && p.position != 0)
+            .map(|p| p.piece_type)
     }
 
     pub fn is_capture(&self, mov: u64) -> bool {
@@ -686,6 +727,10 @@ impl Position {
 
     pub fn is_promotion(&self, mov: u64) -> bool {
         mov & (1 << 12) != 0
+    }
+
+    pub fn get_hash(&self, game: &Game) -> u64 {
+        game.zobrist.hash_position(self)
     }
 }
 
