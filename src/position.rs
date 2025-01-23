@@ -6,6 +6,7 @@ use crate::rayattacks::*;
 use crate::movegen_tables::*;
 use crate::Game;
 use crate::movegeneration::{can_castle, CastlingSide};
+use crate::utils::bit_scan_safe;
 
 type PiecePosition = u64;
 type Bitboard = u64;
@@ -68,7 +69,7 @@ pub enum Color {
 }
 use Color::*;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Copy, Clone, Eq)]
 pub enum PieceType {
     Pawn,
     Rook,
@@ -104,12 +105,21 @@ impl Piece {
     }
 }   
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Square {
     Empty,
     Occupied(usize),
 }
 use Square::*;
+
+impl Square {
+    pub fn get_piece_index(&self) -> Option<usize> {
+        match self {
+            Square::Empty => None,
+            Square::Occupied(idx) => Some(*idx),
+        }
+    }
+}
 
 bitflags! {
     pub struct CastlingRights: u8 {
@@ -224,23 +234,22 @@ impl Position {
     }
 
 
-    #[allow(non_snake_case)]
     pub fn read_FEN(fen: &str, game: &Game) -> Position {
-        let mut Position = Position {
-            pieces: vec![],
-            squares: vec![],
+        let mut position = Position {
+            pieces: Vec::new(),
+            squares: Vec::new(),
+            piece_legal_moves: vec![0; 32],
+            white_occupancy: 0,
+            black_occupancy: 0,
             active_color: Color::White,
-            castling_rights: CastlingRights::ALL,
+            castling_rights: CastlingRights::NONE,
             en_passant: None,
             halfmove_clock: 0,
             fullmove_number: 1,
-            white_occupancy: 0,
-            black_occupancy: 0,
             white_kingside_path_attacked: false,
             white_queenside_path_attacked: false,
             black_kingside_path_attacked: false,
             black_queenside_path_attacked: false,
-            piece_legal_moves: vec![],
             white_king_moved: false,
             black_king_moved: false,
             white_kingside_rook_moved: false,
@@ -249,44 +258,38 @@ impl Position {
             black_queenside_rook_moved: false,
         };
 
-        let (position, rest) = split_on(fen, ' ');
-
-        let mut deque_squares = VecDeque::new();
-        let mut piece_index = 0;
-        let mut piece_position = 64;
-        
-        for row in position.splitn(8, |ch| ch == '/') {
-            piece_position -= 8;
-            let (pieces, squares) = parse_row(&row, piece_index, piece_position);
-            
-            for p in pieces {
-                let position = p.position;
-                match p.color {
-                    Black => Position.black_occupancy |= position,
-                    White => Position.white_occupancy |= position,
-                }
-                Position.pieces.push(p);
-                piece_index += 1;
-            }
-            for s in squares {
-                deque_squares.push_front(s);
-            }
+        let parts: Vec<&str> = fen.split_whitespace().collect();
+        if parts.len() != 6 {
+            panic!("Invalid FEN string: wrong number of fields");
         }
 
-        Position.squares = Vec::from(deque_squares);
+        // Parse board position
+        let rows: Vec<&str> = parts[0].split('/').collect();
+        if rows.len() != 8 {
+            panic!("Invalid FEN string: wrong number of ranks");
+        }
 
+        let mut piece_index = 0;
+        let mut piece_position = 0;
 
-        let (color_to_move, rest) = split_on(rest, ' ');
-        Position.active_color = match color_to_move {
+        for row in rows.iter().rev() {
+            let (mut pieces, mut squares) = parse_row(row, piece_index, piece_position);
+            position.pieces.append(&mut pieces);
+            position.squares.append(&mut squares.iter().cloned().collect());
+            piece_index = position.pieces.len();
+            piece_position += 8;
+        }
+
+        // Parse active color
+        position.active_color = match parts[1] {
             "w" => Color::White,
             "b" => Color::Black,
-            _ => panic!("Unknown color designator: '{}'", color_to_move),
+            _ => panic!("Invalid FEN string: invalid active color"),
         };
 
-
-        let (castling_rights, rest) = split_on(rest, ' ');
+        // Parse castling rights
         let mut castling = CastlingRights::NONE;
-        for ch in castling_rights.chars() {
+        for ch in parts[2].chars() {
             match ch {
                 'K' => castling |= CastlingRights::WHITEKINGSIDE,
                 'Q' => castling |= CastlingRights::WHITEQUEENSIDE,
@@ -296,34 +299,37 @@ impl Position {
                 other => panic!("Invalid character in castling rights: '{}'", other),
             }
         }
-        Position.castling_rights = castling;
+        position.castling_rights = castling;
 
-        let (en_passant, rest) = split_on(rest, ' ');
-        match en_passant {
-            "-" => Position.en_passant = None,
-            s => match position_to_bit(s) {
+        // Parse en passant square
+        position.en_passant = match parts[3] {
+            "-" => None,
+            square => match position_to_bit(square) {
+                Ok(bit) => Some(bit),
                 Err(msg) => panic!("{}", msg),
-                Ok(bit) => Position.en_passant = Some(bit),
-            }
+            },
         };
 
+        // Parse halfmove clock
+        position.halfmove_clock = parts[4].parse().unwrap();
 
-        let (halfmove_clock, rest) = split_on(rest, ' ');
-        match halfmove_clock.parse() {
-            Ok(number) => Position.halfmove_clock = number,
-            Err(_) => panic!("Invalid halfmove: {}", halfmove_clock),
+        // Parse fullmove number
+        position.fullmove_number = parts[5].parse().unwrap();
+
+        // Update occupancy bitboards
+        for piece in &position.pieces {
+            if piece.position != 0 {
+                match piece.color {
+                    Color::White => position.white_occupancy |= piece.position,
+                    Color::Black => position.black_occupancy |= piece.position,
+                }
+            }
         }
 
-        let (fullmove_number, _rest) = split_on(rest, ' ');
-        match fullmove_number.parse() {
-            Ok(number) => Position.fullmove_number = number,
-            Err(_) => panic!("Invalid halfmove: {}", fullmove_number),
-        }
+        // Update legal moves
+        position.update_all_legal_moves(game);
 
-        // Initialize legal moves
-        Position.piece_legal_moves.resize(Position.pieces.len(), 0);
-        Position.update_all_legal_moves(game);
-        Position
+        position
     }
 
     pub fn update_all_legal_moves(&mut self, game: &Game) {
@@ -345,147 +351,234 @@ impl Position {
 
         let all_occupancy = self.white_occupancy | self.black_occupancy;
 
-        // First pass: Calculate legal moves for each piece
+        // First pass: Calculate pseudo-legal moves for each piece
         for (i, piece) in self.pieces.iter().enumerate() {
-            let square = bit_scan(piece.position);
-            let own_occupancy = if piece.color == Color::White { self.white_occupancy } else { self.black_occupancy };
-            let opponent_occupancy = if piece.color == Color::White { self.black_occupancy } else { self.white_occupancy };
-            
-            // Calculate all possible moves for this piece
-            let moves = match piece.piece_type {
-                PieceType::Pawn => {
-                    if piece.color == Color::White {
-                        // Forward moves - only if square is empty
-                        let one_step = (piece.position << 8) & !all_occupancy;
-                        // Double move only allowed from starting rank and if both squares are empty
-                        let two_step = if square >= 8 && square < 16 && one_step != 0 {
-                            (one_step << 8) & !all_occupancy
-                        } else {
-                            0
-                        };
-                        // Diagonal captures - ONLY if there's an opponent piece to capture
-                        let diagonal_captures = game.pawn_attacks.white_diagonal_moves[square] & opponent_occupancy;
-                        // En passant captures - only if pawn is on rank 5 (squares 32-39)
-                        let en_passant_captures = if let Some(ep_square) = self.en_passant {
-                            if square >= 32 && square < 40 {  // Only on rank 5
-                                game.pawn_attacks.white_diagonal_moves[square] & ep_square
+            if piece.position == 0 {
+                continue;  // Skip captured pieces
+            }
+            if piece.color != self.active_color {
+                continue;  // Skip opponent's pieces
+            }
+            if let Some(square) = bit_scan_safe(piece.position) {
+                let own_occupancy = if piece.color == Color::White { self.white_occupancy } else { self.black_occupancy };
+                let opponent_occupancy = if piece.color == Color::White { self.black_occupancy } else { self.white_occupancy };
+                
+                // Calculate all possible moves for this piece
+                let moves = match piece.piece_type {
+                    PieceType::Pawn => {
+                        if piece.color == Color::White {
+                            // Forward moves - only if square is empty
+                            let one_step = (piece.position << 8) & !all_occupancy;
+                            // Double move only allowed from starting rank and if both squares are empty
+                            let two_step = if square >= 8 && square < 16 && one_step != 0 {
+                                (one_step << 8) & !all_occupancy
                             } else {
                                 0
-                            }
-                        } else {
-                            0
-                        };
-                        // Combine all legal moves
-                        one_step | two_step | diagonal_captures | en_passant_captures
-                    } else {
-                        // Forward moves - only if square is empty
-                        let one_step = (piece.position >> 8) & !all_occupancy;
-                        // Double move only allowed from starting rank and if both squares are empty
-                        let two_step = if square >= 48 && square < 56 && one_step != 0 {
-                            (one_step >> 8) & !all_occupancy
-                        } else {
-                            0
-                        };
-                        // Diagonal captures - ONLY if there's an opponent piece to capture
-                        let diagonal_captures = game.pawn_attacks.black_diagonal_moves[square] & opponent_occupancy;
-                        // En passant captures - only if pawn is on rank 4 (squares 24-31)
-                        let en_passant_captures = if let Some(ep_square) = self.en_passant {
-                            if square >= 24 && square < 32 {  // Only on rank 4
-                                game.pawn_attacks.black_diagonal_moves[square] & ep_square
+                            };
+                            // Diagonal captures - ONLY if there's an opponent piece to capture
+                            let diagonal_captures = game.pawn_attacks.white_diagonal_moves[square] & opponent_occupancy;
+                            // En passant captures - only if pawn is on rank 5 (squares 32-39)
+                            let en_passant_captures = if let Some(ep_square) = self.en_passant {
+                                if square >= 32 && square < 40 {  // Only on rank 5
+                                    game.pawn_attacks.white_diagonal_moves[square] & ep_square
+                                } else {
+                                    0
+                                }
                             } else {
                                 0
-                            }
+                            };
+                            // Combine all legal moves
+                            one_step | two_step | diagonal_captures | en_passant_captures
                         } else {
-                            0
-                        };
-                        // Combine all legal moves
-                        one_step | two_step | diagonal_captures | en_passant_captures
-                    }
-                },
-                PieceType::Knight => {
-                    let attacks = game.move_gen_tables.knight_attacks[square];
-                    // Allow moves to empty squares or squares with opponent pieces
-                    attacks & !own_occupancy
-                },
-                PieceType::Bishop => {
-                    let attacks = game.rays.get_bishop_attacks(square, all_occupancy);
-                    // Allow moves to empty squares or squares with opponent pieces
-                    attacks & !own_occupancy
-                },
-                PieceType::Rook => {
-                    let attacks = game.rays.get_rook_attacks(square, all_occupancy);
-                    // Allow moves to empty squares or squares with opponent pieces
-                    attacks & !own_occupancy
-                },
-                PieceType::Queen => {
-                    let bishop_attacks = game.rays.get_bishop_attacks(square, all_occupancy);
-                    let rook_attacks = game.rays.get_rook_attacks(square, all_occupancy);
-                    let attacks = bishop_attacks | rook_attacks;
-                    // Allow moves to empty squares or squares with opponent pieces
-                    attacks & !own_occupancy
-                },
-                PieceType::King => {
-                    let attacks = game.move_gen_tables.king_attacks[square];
-                    // Allow moves to empty squares or squares with opponent pieces
-                    attacks & !own_occupancy
-                },
-            };
+                            // Forward moves - only if square is empty
+                            let one_step = (piece.position >> 8) & !all_occupancy;
+                            // Double move only allowed from starting rank and if both squares are empty
+                            let two_step = if square >= 48 && square < 56 && one_step != 0 {
+                                (one_step >> 8) & !all_occupancy
+                            } else {
+                                0
+                            };
+                            // Diagonal captures - ONLY if there's an opponent piece to capture
+                            let diagonal_captures = game.pawn_attacks.black_diagonal_moves[square] & opponent_occupancy;
+                            // En passant captures - only if pawn is on rank 4 (squares 24-31)
+                            let en_passant_captures = if let Some(ep_square) = self.en_passant {
+                                if square >= 24 && square < 32 {  // Only on rank 4
+                                    game.pawn_attacks.black_diagonal_moves[square] & ep_square
+                                } else {
+                                    0
+                                }
+                            } else {
+                                0
+                            };
+                            // Combine all legal moves
+                            one_step | two_step | diagonal_captures | en_passant_captures
+                        }
+                    },
+                    PieceType::Knight => {
+                        let attacks = game.move_gen_tables.knight_attacks[square];
+                        // Allow moves to empty squares or squares with opponent pieces
+                        attacks & !own_occupancy & ((!all_occupancy) | opponent_occupancy)
+                    },
+                    PieceType::Bishop => {
+                        let attacks = game.rays.get_bishop_attacks(square, all_occupancy);
+                        // Allow moves to empty squares or squares with opponent pieces
+                        attacks & !own_occupancy & ((!all_occupancy) | opponent_occupancy)
+                    },
+                    PieceType::Rook => {
+                        let attacks = game.rays.get_rook_attacks(square, all_occupancy);
+                        // Allow moves to empty squares or squares with opponent pieces
+                        attacks & !own_occupancy & ((!all_occupancy) | opponent_occupancy)
+                    },
+                    PieceType::Queen => {
+                        let bishop_attacks = game.rays.get_bishop_attacks(square, all_occupancy);
+                        let rook_attacks = game.rays.get_rook_attacks(square, all_occupancy);
+                        let attacks = bishop_attacks | rook_attacks;
+                        // Allow moves to empty squares or squares with opponent pieces
+                        attacks & !own_occupancy & ((!all_occupancy) | opponent_occupancy)
+                    },
+                    PieceType::King => {
+                        let attacks = game.move_gen_tables.king_attacks[square];
+                        // Allow moves to empty squares or squares with opponent pieces
+                        attacks & !own_occupancy
+                    },
+                };
 
-            // Store the legal moves for this piece
-            self.piece_legal_moves[i] = moves;
+                // Filter out moves that would leave the king in check
+                let mut legal_moves = 0u64;
+                for to_square in extract_bits(moves) {
+                    let mut test_position = self.clone();
+                    let from_bitboard = 1u64 << square;
+                    let to_bitboard = 1u64 << to_square;
+                    
+                    // Update piece position
+                    test_position.pieces[i].position = to_bitboard;
+                    
+                    // Update occupancy bitboards
+                    if piece.color == Color::White {
+                        test_position.white_occupancy &= !from_bitboard;
+                        test_position.white_occupancy |= to_bitboard;
+                    } else {
+                        test_position.black_occupancy &= !from_bitboard;
+                        test_position.black_occupancy |= to_bitboard;
+                    }
+                    
+                    // If there was a capture, remove the captured piece
+                    if let Some(captured_idx) = test_position.squares[to_square as usize].get_piece_index() {
+                        test_position.pieces[captured_idx].position = 0;
+                        if test_position.pieces[captured_idx].color == Color::White {
+                            test_position.white_occupancy &= !to_bitboard;
+                        } else {
+                            test_position.black_occupancy &= !to_bitboard;
+                        }
+                    }
+                    
+                    // Update squares array
+                    test_position.squares[square as usize] = Square::Empty;
+                    test_position.squares[to_square as usize] = Square::Occupied(i);
+                    
+                    // Save the original active color
+                    let original_active_color = test_position.active_color;
+                    // Set active color to the moving piece's color to check if that side's king is in check
+                    test_position.active_color = piece.color;
+                    
+                    // If this move doesn't leave the king in check, it's legal
+                    if !test_position.is_in_check(game) {
+                        legal_moves |= to_bitboard;
+                    }
+                    
+                    // Restore the original active color
+                    test_position.active_color = original_active_color;
+                }
+
+                // Store the legal moves for this piece
+                self.piece_legal_moves[i] = legal_moves;
+            }
         }
 
         // Second pass: Check attacks on castling paths
         for piece in self.pieces.iter() {
-            let square = bit_scan(piece.position);
-            
-            // Calculate attack squares based on piece type
-            let attack_squares = match piece.piece_type {
-                PieceType::Pawn => {
-                    if piece.color == Color::White {
-                        game.pawn_attacks.white_diagonal_moves[square]
-                    } else {
-                        game.pawn_attacks.black_diagonal_moves[square]
-                    }
-                },
-                PieceType::Knight => game.move_gen_tables.knight_attacks[square],
-                PieceType::Bishop => game.rays.get_bishop_attacks(square, all_occupancy),
-                PieceType::Rook => game.rays.get_rook_attacks(square, all_occupancy),
-                PieceType::Queen => {
-                    game.rays.get_bishop_attacks(square, all_occupancy) | 
-                    game.rays.get_rook_attacks(square, all_occupancy)
-                },
-                PieceType::King => game.move_gen_tables.king_attacks[square],
-            };
-
-            // White pieces attack black's castling paths
-            if piece.color == Color::White {
-                if (attack_squares & black_kingside_path) != 0 {
-                    self.black_kingside_path_attacked = true;
-                }
-                if (attack_squares & black_queenside_path) != 0 {
-                    self.black_queenside_path_attacked = true;
-                }
+            if piece.position == 0 {
+                continue;  // Skip captured pieces
             }
-            // Black pieces attack white's castling paths
-            else {
-                if (attack_squares & white_kingside_path) != 0 {
-                    self.white_kingside_path_attacked = true;
+            if let Some(square) = bit_scan_safe(piece.position) {
+                // Calculate attack squares based on piece type
+                let attack_squares = match piece.piece_type {
+                    PieceType::Pawn => {
+                        if piece.color == Color::White {
+                            game.pawn_attacks.white_diagonal_moves[square]
+                        } else {
+                            game.pawn_attacks.black_diagonal_moves[square]
+                        }
+                    },
+                    PieceType::Knight => game.move_gen_tables.knight_attacks[square],
+                    PieceType::Bishop => game.rays.get_bishop_attacks(square, all_occupancy),
+                    PieceType::Rook => game.rays.get_rook_attacks(square, all_occupancy),
+                    PieceType::Queen => {
+                        game.rays.get_bishop_attacks(square, all_occupancy) | 
+                        game.rays.get_rook_attacks(square, all_occupancy)
+                    },
+                    PieceType::King => game.move_gen_tables.king_attacks[square],
+                };
+
+                // White pieces attack black's castling paths
+                if piece.color == Color::White {
+                    if (attack_squares & black_kingside_path) != 0 {
+                        self.black_kingside_path_attacked = true;
+                    }
+                    if (attack_squares & black_queenside_path) != 0 {
+                        self.black_queenside_path_attacked = true;
+                    }
                 }
-                if (attack_squares & white_queenside_path) != 0 {
-                    self.white_queenside_path_attacked = true;
+                // Black pieces attack white's castling paths
+                else {
+                    if (attack_squares & white_kingside_path) != 0 {
+                        self.white_kingside_path_attacked = true;
+                    }
+                    if (attack_squares & white_queenside_path) != 0 {
+                        self.white_queenside_path_attacked = true;
+                    }
                 }
             }
         }
     }
 
-    pub fn move_piece(self: &mut Self, piece_position: Bitboard, new_position: usize, game: &Game) {
-        let square_index = bit_scan(piece_position);
+    pub fn move_piece(&mut self, piece_position: Bitboard, new_position: usize, game: &Game) {
+        let square_index = bit_scan(piece_position) as usize;
         let square = self.squares[square_index];
         let piece_index = match square {
-            Empty => panic!("Tried to move piece from an empty square"),
-            Occupied(idx) => idx,
+            Square::Occupied(idx) => idx,
+            Square::Empty => panic!("No piece at source square"),
         };
+
+        let new_pos_bit = 1u64 << new_position;
+        let old_pos_bit = piece_position;
+        let piece_color = self.pieces[piece_index].color;
+
+        // First handle capture if there is one
+        if let Square::Occupied(captured_idx) = self.squares[new_position] {
+            // Mark the captured piece as captured by setting its position to 0
+            self.pieces[captured_idx].position = 0;
+            // Remove the captured piece from the appropriate occupancy bitboard
+            match self.pieces[captured_idx].color {
+                Color::White => self.white_occupancy &= !new_pos_bit,
+                Color::Black => self.black_occupancy &= !new_pos_bit,
+            }
+        }
+
+        // Update squares array
+        self.squares[square_index] = Square::Empty;
+        self.squares[new_position] = Square::Occupied(piece_index);
+
+        // Update the moving piece's position and occupancy
+        match piece_color {
+            Color::White => {
+                self.white_occupancy = (self.white_occupancy & !old_pos_bit) | new_pos_bit;
+            }
+            Color::Black => {
+                self.black_occupancy = (self.black_occupancy & !old_pos_bit) | new_pos_bit;
+            }
+        }
+        self.pieces[piece_index].position = new_pos_bit;
 
         // Check if this is a pawn making a two-square move
         let is_pawn_double_move = {
@@ -502,29 +595,6 @@ impl Position {
                 false
             }
         };
-
-        // Update piece position
-        let new_pos_bit = 1u64 << new_position;
-        self.pieces[piece_index].position = new_pos_bit;
-        
-        // Update occupancy bitboards
-        let piece_color = self.pieces[piece_index].color;
-        let old_pos_bit = piece_position;
-        
-        match piece_color {
-            Color::White => {
-                self.white_occupancy &= !old_pos_bit;
-                self.white_occupancy |= new_pos_bit;
-            }
-            Color::Black => {
-                self.black_occupancy &= !old_pos_bit;
-                self.black_occupancy |= new_pos_bit;
-            }
-        }
-
-        // Update squares array
-        self.squares[square_index] = Empty;
-        self.squares[new_position] = Occupied(piece_index);
 
         // Set en passant square if this was a pawn double move
         if is_pawn_double_move {
@@ -582,20 +652,24 @@ impl Position {
                 continue;
             }
             let piece = &self.pieces[i];
-            let from_square = bit_scan(piece.position) as u64;
-            for to_square in extract_bits(*legal_moves_bitboard) {
-                // Encode move: from_square in lower 6 bits, to_square in next 6 bits
-                let mut mov = from_square | ((to_square as u64) << 6);
-                
-                // Set promotion flag for pawns moving to the last rank
-                if piece.piece_type == PieceType::Pawn {
-                    let to_rank = to_square / 8;
-                    if (piece.color == Color::White && to_rank == 7) || 
-                       (piece.color == Color::Black && to_rank == 0) {
-                        mov |= 1 << 12;  // Set promotion flag
+            if piece.position == 0 {
+                continue;  // Skip pieces that have been captured
+            }
+            if let Some(from_square) = bit_scan_safe(piece.position) {
+                for to_square in extract_bits(*legal_moves_bitboard) {
+                    // Encode move: from_square in lower 6 bits, to_square in next 6 bits
+                    let mut mov = (from_square as u64) | ((to_square as u64) << 6);
+                    
+                    // Set promotion flag for pawns moving to the last rank
+                    if piece.piece_type == PieceType::Pawn {
+                        let to_rank = to_square / 8;
+                        if (piece.color == Color::White && to_rank == 7) || 
+                           (piece.color == Color::Black && to_rank == 0) {
+                            mov |= 1 << 12;  // Set promotion flag
+                        }
                     }
+                    moves.push(mov);
                 }
-                moves.push(mov);
             }
         }
         moves
@@ -609,7 +683,7 @@ impl Position {
         let to_bitboard = 1u64 << to_square;
 
         // Find the piece being moved
-        if let Some(piece_idx) = self.pieces.iter().position(|p| p.position != 0 && p.position == from_bitboard) {
+        if let Some(piece_idx) = self.pieces.iter().position(|p| p.position == from_bitboard) {
             // Handle capture if there is one
             if let Square::Occupied(captured_idx) = self.squares[to_square as usize] {
                 // Remove the captured piece from the appropriate occupancy bitboard
@@ -631,12 +705,10 @@ impl Position {
             // Update occupancy bitboards
             match self.pieces[piece_idx].color {
                 Color::White => {
-                    self.white_occupancy &= !from_bitboard;
-                    self.white_occupancy |= to_bitboard;
+                    self.white_occupancy = (self.white_occupancy & !from_bitboard) | to_bitboard;
                 },
                 Color::Black => {
-                    self.black_occupancy &= !from_bitboard;
-                    self.black_occupancy |= to_bitboard;
+                    self.black_occupancy = (self.black_occupancy & !from_bitboard) | to_bitboard;
                 }
             }
 
@@ -662,48 +734,76 @@ impl Position {
         });
 
         if let Some(king) = king {
-            let king_square = bit_scan(king.position);
-            let opponent_color = if self.active_color == Color::White { Color::Black } else { Color::White };
-            
-            // Check for attacks from opponent's pieces
-            for piece in self.pieces.iter().filter(|p| p.color == opponent_color) {
-                let piece_square = bit_scan(piece.position);
-                let all_occupancy = self.white_occupancy | self.black_occupancy;
+            if king.position == 0 {
+                return false;  // King has been captured (shouldn't happen in a valid game)
+            }
+            if let Some(king_square) = bit_scan_safe(king.position) {
+                let opponent_color = if self.active_color == Color::White { Color::Black } else { Color::White };
                 
-                // Calculate attack squares based on piece type
-                let attacks = match piece.piece_type {
-                    PieceType::Pawn => {
-                        if piece.color == Color::White {
-                            game.pawn_attacks.white_diagonal_moves[piece_square]
-                        } else {
-                            game.pawn_attacks.black_diagonal_moves[piece_square]
+                // Check for attacks from opponent's pieces
+                for piece in self.pieces.iter().filter(|p| p.color == opponent_color) {
+                    if piece.position == 0 {
+                        continue;  // Skip captured pieces
+                    }
+                    if let Some(piece_square) = bit_scan_safe(piece.position) {
+                        let all_occupancy = self.white_occupancy | self.black_occupancy;
+                        
+                        // Calculate attack squares based on piece type
+                        let attacks = match piece.piece_type {
+                            PieceType::Pawn => {
+                                if piece.color == Color::White {
+                                    game.pawn_attacks.white_diagonal_moves[piece_square]
+                                } else {
+                                    game.pawn_attacks.black_diagonal_moves[piece_square]
+                                }
+                            },
+                            PieceType::Knight => game.move_gen_tables.knight_attacks[piece_square],
+                            PieceType::Bishop => game.rays.get_bishop_attacks(piece_square, all_occupancy),
+                            PieceType::Rook => game.rays.get_rook_attacks(piece_square, all_occupancy),
+                            PieceType::Queen => {
+                                game.rays.get_bishop_attacks(piece_square, all_occupancy) | 
+                                game.rays.get_rook_attacks(piece_square, all_occupancy)
+                            },
+                            PieceType::King => game.move_gen_tables.king_attacks[piece_square],
+                        };
+                        
+                        // If the king's square is in the attack set, it's in check
+                        if (attacks & king.position) != 0 {
+                            return true;
                         }
-                    },
-                    PieceType::Knight => game.move_gen_tables.knight_attacks[piece_square],
-                    PieceType::Bishop => game.rays.get_bishop_attacks(piece_square, all_occupancy),
-                    PieceType::Rook => game.rays.get_rook_attacks(piece_square, all_occupancy),
-                    PieceType::Queen => {
-                        game.rays.get_bishop_attacks(piece_square, all_occupancy) | 
-                        game.rays.get_rook_attacks(piece_square, all_occupancy)
-                    },
-                    PieceType::King => game.move_gen_tables.king_attacks[piece_square],
-                };
-                
-                // If the king's square is in the attack set, it's in check
-                if (attacks & king.position) != 0 {
-                    return true;
+                    }
                 }
             }
         }
-        
         false
     }
 
     /// Get all capturing moves in the current position
     pub fn get_captures(&self, game: &Game) -> Vec<u64> {
-        // TODO: Implement capture move filtering
-        // For now, return all moves as a placeholder
-        self.get_all_legal_moves(game)
+        let mut captures = Vec::new();
+        for (i, legal_moves_bitboard) in self.piece_legal_moves.iter().enumerate() {
+            if *legal_moves_bitboard == 0 {
+                continue;
+            }
+            let piece = &self.pieces[i];
+            if piece.position == 0 {
+                continue;  // Skip pieces that have been captured
+            }
+            if let Some(from_square) = bit_scan_safe(piece.position) {
+                for to_square in extract_bits(*legal_moves_bitboard) {
+                    let to_bitboard = 1u64 << to_square;
+                    let opponent_occupancy = if piece.color == Color::White { self.black_occupancy } else { self.white_occupancy };
+                    
+                    // Only include moves that capture opponent pieces
+                    if to_bitboard & opponent_occupancy != 0 {
+                        // Encode move: from_square in lower 6 bits, to_square in next 6 bits
+                        let mov = (from_square as u64) | ((to_square as u64) << 6);
+                        captures.push(mov);
+                    }
+                }
+            }
+        }
+        captures
     }
 
     pub fn get_piece_at(&self, square: u64) -> Option<PieceType> {
@@ -721,8 +821,21 @@ impl Position {
     }
 
     pub fn is_capture(&self, mov: u64) -> bool {
-        let to_square = 1u64 << ((mov >> 6) & 0x3F);  // Extract to_square from bits 6-11
-        self.get_piece_at(to_square).is_some()
+        let from_square = mov & 0x3F;  // Extract from_square from bits 0-5
+        let to_square = (mov >> 6) & 0x3F;  // Extract to_square from bits 6-11
+        
+        // Get the moving piece's color
+        if let Some(piece_idx) = self.squares[from_square as usize].get_piece_index() {
+            let moving_piece_color = self.pieces[piece_idx].color;
+            
+            // Check if there's a piece at the target square and it belongs to the opponent
+            if let Some(target_idx) = self.squares[to_square as usize].get_piece_index() {
+                let target_piece = &self.pieces[target_idx];
+                // Check if the target piece exists and belongs to the opponent
+                return target_piece.position != 0 && target_piece.color != moving_piece_color;
+            }
+        }
+        false
     }
 
     pub fn is_promotion(&self, mov: u64) -> bool {
@@ -966,11 +1079,12 @@ mod tests {
     fn test_move_piece(){
         let game = Game::new();
         let mut position = Position::new(&game);
+        let piece_index = position.squares[0].get_piece_index().unwrap();
         position.move_piece(1 << 0, 16, &game);
 
-        assert_eq!(position.pieces[24].position, 1 << 16);
-        assert_eq!(position.squares[0], Empty);
-        assert_eq!(position.squares[16], Occupied(24))
+        assert_eq!(position.pieces[piece_index].position, 1 << 16);  // The piece should be at square 16
+        assert_eq!(position.squares[0], Empty);  // The original square should be empty
+        assert_eq!(position.squares[16], Occupied(piece_index));  // The new square should contain the piece
     }
 
     #[test]
@@ -987,7 +1101,13 @@ mod tests {
 
         // Test white knight can move to a3 and c3, but not to squares occupied by own pawns
         let white_knight_1_moves = position.piece_legal_moves[1];  // b1 knight
-        let white_knight_2_moves = position.piece_legal_moves[6];  // g1 knight
+        println!("White knight position: {:b}", position.pieces[1].position);
+        println!("White knight square: {}", bit_scan(position.pieces[1].position));
+        println!("White knight attacks: {:b}", game.move_gen_tables.knight_attacks[bit_scan(position.pieces[1].position)]);
+        println!("White occupancy: {:b}", position.white_occupancy);
+        println!("Black occupancy: {:b}", position.black_occupancy);
+        println!("All occupancy: {:b}", position.white_occupancy | position.black_occupancy);
+        println!("White knight legal moves: {:b}", white_knight_1_moves);
         assert_ne!(white_knight_1_moves, 0);
     }
 
@@ -1139,5 +1259,69 @@ mod tests {
 
         // Castling should still not be allowed because the bishop is still blocking the path
         assert!(!can_castle(&position, Color::White, CastlingSide::Kingside));
+    }
+
+    #[test]
+    fn test_capture_piece_replacement() {
+        let game = Game::new();
+        // Set up a position where Black's bishop can capture White's bishop
+        let mut position = Position::read_FEN(
+            "rnbqkbnr/ppp2ppp/8/3pp3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+            &game
+        );
+
+        // Find White's bishop
+        let white_bishop_idx = position.pieces.iter().position(|p| {
+            p.piece_type == PieceType::Bishop && p.color == Color::White && p.position != 0
+        }).unwrap();
+
+        println!("Initial position:");
+        println!("{}", position.to_string());
+        println!("White bishop index: {}", white_bishop_idx);
+        println!("White bishop position: {}", position.pieces[white_bishop_idx].position);
+
+        // Move White's bishop to f4 where it can be captured
+        let from_square = bit_scan(position.pieces[white_bishop_idx].position);
+        position.move_piece(1u64 << from_square, 29, &game); // Move to f4 (square 29)
+
+        println!("\nAfter moving white bishop to f4:");
+        println!("{}", position.to_string());
+        println!("White bishop position: {}", position.pieces[white_bishop_idx].position);
+
+        // Find Black's bishop
+        let black_bishop_idx = position.pieces.iter().position(|p| {
+            p.piece_type == PieceType::Bishop && p.color == Color::Black && p.position != 0
+        }).unwrap();
+
+        println!("\nBlack bishop index: {}", black_bishop_idx);
+        println!("Black bishop position: {}", position.pieces[black_bishop_idx].position);
+
+        // Capture White's bishop with Black's bishop
+        let from_square = bit_scan(position.pieces[black_bishop_idx].position);
+        position.move_piece(1u64 << from_square, 29, &game); // Capture on f4
+
+        println!("\nAfter capturing white bishop:");
+        println!("{}", position.to_string());
+        println!("White bishop position: {}", position.pieces[white_bishop_idx].position);
+        println!("Black bishop position: {}", position.pieces[black_bishop_idx].position);
+        println!("Square at f4: {:?}", position.squares[29]);
+        println!("White occupancy at f4: {}", position.white_occupancy & (1u64 << 29));
+        println!("Black occupancy at f4: {}", position.black_occupancy & (1u64 << 29));
+
+        // Verify that:
+        // 1. White's bishop is removed (position = 0)
+        assert_eq!(position.pieces[white_bishop_idx].position, 0, "White's bishop should be captured (position = 0)");
+        
+        // 2. Black's bishop is on f4
+        assert_eq!(position.pieces[black_bishop_idx].position, 1u64 << 29, "Black's bishop should be on f4");
+        
+        // 3. The square f4 contains Black's bishop
+        assert_eq!(position.squares[29], Square::Occupied(black_bishop_idx), "Square f4 should contain Black's bishop");
+        
+        // 4. White's occupancy doesn't include f4
+        assert_eq!(position.white_occupancy & (1u64 << 29), 0, "White's occupancy should not include f4");
+        
+        // 5. Black's occupancy includes f4
+        assert_ne!(position.black_occupancy & (1u64 << 29), 0, "Black's occupancy should include f4");
     }
 }

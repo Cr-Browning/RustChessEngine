@@ -57,12 +57,12 @@ pub fn split_on(s: &str, delimiter: char) -> (&str, &str) {
 /// 
 /// # Returns
 /// 
-/// * The index of the least significant set bit
+/// * Option containing the index of the least significant set bit, or None if bitboard is empty
 pub fn bit_scan(bitboard: Bitboard) -> usize {
-    match bit_scan_safe(bitboard) {
-        Some(index) => index,
-        None => 0  // Return 0 for empty bitboards instead of panicking
+    if bitboard == 0 {
+        panic!("Attempted to scan empty bitboard");
     }
+    bitboard.trailing_zeros() as usize
 }
 
 /// Safe version of bit_scan that returns an Option

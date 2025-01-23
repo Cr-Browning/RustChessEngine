@@ -7,11 +7,8 @@
 use crate::position::*;
 #[allow(unused_imports)]
 use crate::knightattacks::*;
-use crate::pawnattacks::*;
-use crate::rayattacks::*;
 use crate::position::PieceType::*;
-use crate::position::Square::*;
-use crate::utils::{bit_scan, extract_bits, print_bitboard};
+use crate::utils::{bit_scan_safe, extract_bits};
 use crate::Game;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -113,71 +110,76 @@ pub fn generate_moves(game: &Game) -> Vec<Position> {
 /// * A vector of new positions representing legal pawn moves
 fn generate_pawn_moves(piece: &Piece, game: &Game, all_occupancy: u64, opponent_occupancy: u64) -> Vec<Position> {
     let mut new_positions = Vec::new();
-    let square = bit_scan(piece.position);
-    
-    // Use the correct forward and diagonal moves based on color
-    let (forward_moves, diagonal_moves) = match piece.color {
-        Color::White => (
-            game.pawn_attacks.white_forward_moves[square],
-            game.pawn_attacks.white_diagonal_moves[square]
-        ),
-        Color::Black => (
-            game.pawn_attacks.black_forward_moves[square],
-            game.pawn_attacks.black_diagonal_moves[square]
-        ),
-    };
-    
-    // Forward moves (not blocked)
-    let single_forward = forward_moves & !all_occupancy;
-    let double_forward = if piece.color == Color::White && bit_scan(piece.position) / 8 == 1 {
-        // For white pawns on second rank, check if both squares are empty
-        let single_empty = (forward_moves & !all_occupancy) != 0;
-        if single_empty {
-            forward_moves & !all_occupancy & (0xFF << 16) // Only allow double moves to rank 4
+    if piece.position == 0 {
+        return new_positions;  // Skip captured pieces
+    }
+    if let Some(square) = bit_scan_safe(piece.position) {
+        // Use the correct forward and diagonal moves based on color
+        let (forward_moves, diagonal_moves) = match piece.color {
+            Color::White => (
+                game.pawn_attacks.white_forward_moves[square],
+                game.pawn_attacks.white_diagonal_moves[square]
+            ),
+            Color::Black => (
+                game.pawn_attacks.black_forward_moves[square],
+                game.pawn_attacks.black_diagonal_moves[square]
+            ),
+        };
+        
+        // Forward moves (not blocked)
+        let single_forward = forward_moves & !all_occupancy;
+        let double_forward = if piece.color == Color::White && square / 8 == 1 {
+            // For white pawns on second rank, check if both squares are empty
+            let single_empty = (forward_moves & !all_occupancy) != 0;
+            if single_empty {
+                forward_moves & !all_occupancy & (0xFF << 16) // Only allow double moves to rank 4
+            } else {
+                0
+            }
+        } else if piece.color == Color::Black && square / 8 == 6 {
+            // For black pawns on seventh rank, check if both squares are empty
+            let single_empty = (forward_moves & !all_occupancy) != 0;
+            if single_empty {
+                forward_moves & !all_occupancy & (0xFF << 32) // Only allow double moves to rank 5
+            } else {
+                0
+            }
         } else {
             0
-        }
-    } else if piece.color == Color::Black && bit_scan(piece.position) / 8 == 6 {
-        // For black pawns on seventh rank, check if both squares are empty
-        let single_empty = (forward_moves & !all_occupancy) != 0;
-        if single_empty {
-            forward_moves & !all_occupancy & (0xFF << 32) // Only allow double moves to rank 5
-        } else {
-            0
-        }
-    } else {
-        0
-    };
-    
-    // Add single moves
-    for target in extract_bits(single_forward) {
-        let mut new_position = game.position.clone();
-        new_position.move_piece(piece.position, target, game);
-        new_positions.push(new_position);
-    }
-    
-    // Add double moves
-    for target in extract_bits(double_forward) {
-        let mut new_position = game.position.clone();
-        new_position.move_piece(piece.position, target, game);
-        new_positions.push(new_position);
-    }
-    
-    // Diagonal captures
-    let captures = diagonal_moves & opponent_occupancy;
-    for target in extract_bits(captures) {
-        let mut new_position = game.position.clone();
-        new_position.move_piece(piece.position, target, game);
-        new_positions.push(new_position);
-    }
-    
-    // En passant
-    if let Some(en_passant) = game.position.en_passant {
-        let en_passant_captures = diagonal_moves & en_passant;
-        if en_passant_captures != 0 {
+        };
+        
+        // Add single moves
+        for target in extract_bits(single_forward) {
             let mut new_position = game.position.clone();
-            new_position.move_piece(piece.position, bit_scan(en_passant), game);
+            new_position.move_piece(piece.position, target, game);
             new_positions.push(new_position);
+        }
+        
+        // Add double moves
+        for target in extract_bits(double_forward) {
+            let mut new_position = game.position.clone();
+            new_position.move_piece(piece.position, target, game);
+            new_positions.push(new_position);
+        }
+        
+        // Diagonal captures
+        let captures = diagonal_moves & opponent_occupancy;
+        for target in extract_bits(captures) {
+            let mut new_position = game.position.clone();
+            new_position.move_piece(piece.position, target, game);
+            new_positions.push(new_position);
+        }
+        
+        // En passant
+        if let Some(en_passant) = game.position.en_passant {
+            let en_passant_captures = diagonal_moves & en_passant;
+            if en_passant_captures != 0 {
+                if let Some(target) = bit_scan_safe(en_passant) {
+                    let mut new_position = game.position.clone();
+                    new_position.move_piece(piece.position, target, game);
+                    new_positions.push(new_position);
+                }
+            }
         }
     }
     
@@ -196,14 +198,19 @@ fn generate_pawn_moves(piece: &Piece, game: &Game, all_occupancy: u64, opponent_
 /// 
 /// * A vector of new positions representing legal knight moves
 fn generate_knight_moves(piece: &Piece, game: &Game, own_occupancy: u64) -> Vec<Position> {
-    let mut attacks = game.move_gen_tables.knight_attacks[bit_scan(piece.position)];
-    attacks &= !own_occupancy;
-    let potential_moves = extract_bits(attacks);
-    let mut new_positions = vec![];
-    for pmove in potential_moves {
-         let mut new_position = game.position.clone();
-         new_position.move_piece(piece.position, pmove, game);
-         new_positions.push(new_position);
+    let mut new_positions = Vec::new();
+    if piece.position == 0 {
+        return new_positions;  // Skip captured pieces
+    }
+    if let Some(square) = bit_scan_safe(piece.position) {
+        let mut attacks = game.move_gen_tables.knight_attacks[square];
+        attacks &= !own_occupancy;
+        let potential_moves = extract_bits(attacks);
+        for pmove in potential_moves {
+            let mut new_position = game.position.clone();
+            new_position.move_piece(piece.position, pmove, game);
+            new_positions.push(new_position);
+        }
     }
     new_positions
 }
@@ -221,15 +228,19 @@ fn generate_knight_moves(piece: &Piece, game: &Game, own_occupancy: u64) -> Vec<
 /// 
 /// * A vector of new positions representing legal bishop moves
 fn generate_bishop_moves(piece: &Piece, game: &Game, own_occupancy: u64, all_occupancy: u64) -> Vec<Position> {
-    let square = bit_scan(piece.position);
-    let attacks = game.rays.get_bishop_attacks(square, all_occupancy);
-    let valid_moves = attacks & !own_occupancy;
-    
     let mut new_positions = Vec::new();
-    for target in extract_bits(valid_moves) {
-        let mut new_position = game.position.clone();
-        new_position.move_piece(piece.position, target, game);
-        new_positions.push(new_position);
+    if piece.position == 0 {
+        return new_positions;  // Skip captured pieces
+    }
+    if let Some(square) = bit_scan_safe(piece.position) {
+        let attacks = game.rays.get_bishop_attacks(square, all_occupancy);
+        let valid_moves = attacks & !own_occupancy;
+        
+        for target in extract_bits(valid_moves) {
+            let mut new_position = game.position.clone();
+            new_position.move_piece(piece.position, target, game);
+            new_positions.push(new_position);
+        }
     }
     new_positions
 }
@@ -247,15 +258,19 @@ fn generate_bishop_moves(piece: &Piece, game: &Game, own_occupancy: u64, all_occ
 /// 
 /// * A vector of new positions representing legal rook moves
 fn generate_rook_moves(piece: &Piece, game: &Game, own_occupancy: u64, all_occupancy: u64) -> Vec<Position> {
-    let square = bit_scan(piece.position);
-    let attacks = game.rays.get_rook_attacks(square, all_occupancy);
-    let valid_moves = attacks & !own_occupancy;
-    
     let mut new_positions = Vec::new();
-    for target in extract_bits(valid_moves) {
-        let mut new_position = game.position.clone();
-        new_position.move_piece(piece.position, target, game);
-        new_positions.push(new_position);
+    if piece.position == 0 {
+        return new_positions;  // Skip captured pieces
+    }
+    if let Some(square) = bit_scan_safe(piece.position) {
+        let attacks = game.rays.get_rook_attacks(square, all_occupancy);
+        let valid_moves = attacks & !own_occupancy;
+        
+        for target in extract_bits(valid_moves) {
+            let mut new_position = game.position.clone();
+            new_position.move_piece(piece.position, target, game);
+            new_positions.push(new_position);
+        }
     }
     new_positions
 }
@@ -276,15 +291,19 @@ fn generate_rook_moves(piece: &Piece, game: &Game, own_occupancy: u64, all_occup
 /// 
 /// * A vector of new positions representing legal queen moves
 fn generate_queen_moves(piece: &Piece, game: &Game, own_occupancy: u64, all_occupancy: u64) -> Vec<Position> {
-    let square = bit_scan(piece.position);
-    let attacks = game.rays.get_queen_attacks(square, all_occupancy);
-    let valid_moves = attacks & !own_occupancy;
-    
     let mut new_positions = Vec::new();
-    for target in extract_bits(valid_moves) {
-        let mut new_position = game.position.clone();
-        new_position.move_piece(piece.position, target, game);
-        new_positions.push(new_position);
+    if piece.position == 0 {
+        return new_positions;  // Skip captured pieces
+    }
+    if let Some(square) = bit_scan_safe(piece.position) {
+        let attacks = game.rays.get_queen_attacks(square, all_occupancy);
+        let valid_moves = attacks & !own_occupancy;
+        
+        for target in extract_bits(valid_moves) {
+            let mut new_position = game.position.clone();
+            new_position.move_piece(piece.position, target, game);
+            new_positions.push(new_position);
+        }
     }
     new_positions
 }
@@ -304,27 +323,29 @@ fn generate_queen_moves(piece: &Piece, game: &Game, own_occupancy: u64, all_occu
 /// 
 /// * A vector of new positions representing legal king moves
 fn generate_king_moves(piece: &Piece, game: &Game, own_occupancy: u64, all_occupancy: u64) -> Vec<Position> {
-    let square = bit_scan(piece.position);
-    let mut attacks = game.move_gen_tables.king_attacks[square];
-    attacks &= !own_occupancy;
-    
     let mut new_positions = Vec::new();
-    
-    // Normal moves
-    for target in extract_bits(attacks) {
-        let mut new_position = game.position.clone();
-        new_position.move_piece(piece.position, target, game);
-        new_positions.push(new_position);
+    if piece.position == 0 {
+        return new_positions;  // Skip captured pieces
     }
-    
-    // Castling moves
-    if can_castle(&game.position, piece.color, CastlingSide::Kingside) {
-        add_castling_moves(piece, game, &mut new_positions, CastlingSide::Kingside);
+    if let Some(square) = bit_scan_safe(piece.position) {
+        let mut attacks = game.move_gen_tables.king_attacks[square];
+        attacks &= !own_occupancy;
+        
+        // Normal moves
+        for target in extract_bits(attacks) {
+            let mut new_position = game.position.clone();
+            new_position.move_piece(piece.position, target, game);
+            new_positions.push(new_position);
+        }
+        
+        // Castling moves
+        if can_castle(&game.position, piece.color, CastlingSide::Kingside) {
+            add_castling_moves(piece, game, &mut new_positions, CastlingSide::Kingside);
+        }
+        if can_castle(&game.position, piece.color, CastlingSide::Queenside) {
+            add_castling_moves(piece, game, &mut new_positions, CastlingSide::Queenside);
+        }
     }
-    if can_castle(&game.position, piece.color, CastlingSide::Queenside) {
-        add_castling_moves(piece, game, &mut new_positions, CastlingSide::Queenside);
-    }
-    
     new_positions
 }
 
@@ -431,59 +452,63 @@ pub fn can_castle(position: &Position, color: Color, side: CastlingSide) -> bool
 /// * `new_positions` - Vector to add castling moves to
 /// * `side` - The castling side
 fn add_castling_moves(piece: &Piece, game: &Game, new_positions: &mut Vec<Position>, side: CastlingSide) {
-    let mut new_position = game.position.clone();
-    let king_pos = bit_scan(piece.position);
-    let (new_king_pos, new_rook_pos, old_rook_pos) = match (piece.color, side) {
-        (Color::White, CastlingSide::Kingside) => (6, 5, 7),   // g1, f1, h1
-        (Color::White, CastlingSide::Queenside) => (2, 3, 0),  // c1, d1, a1
-        (Color::Black, CastlingSide::Kingside) => (62, 61, 63),  // g8, f8, h8
-        (Color::Black, CastlingSide::Queenside) => (58, 59, 56),  // c8, d8, a8
-    };
-
-    // Move the king
-    let king_piece = new_position.pieces.iter_mut()
-        .find(|p| p.piece_type == PieceType::King && p.color == piece.color)
-        .unwrap();
-    king_piece.position = 1u64 << new_king_pos;
-
-    // Move the rook
-    let rook_piece = new_position.pieces.iter_mut()
-        .find(|p| p.piece_type == PieceType::Rook && p.color == piece.color && p.position == 1u64 << old_rook_pos)
-        .unwrap();
-    rook_piece.position = 1u64 << new_rook_pos;
-
-    // Update occupancy bitboards
-    if piece.color == Color::White {
-        new_position.white_occupancy = new_position.pieces.iter()
-            .filter(|p| p.color == Color::White)
-            .map(|p| p.position)
-            .fold(0, |acc, pos| acc | pos);
-    } else {
-        new_position.black_occupancy = new_position.pieces.iter()
-            .filter(|p| p.color == Color::Black)
-            .map(|p| p.position)
-            .fold(0, |acc, pos| acc | pos);
+    if piece.position == 0 {
+        return;  // Skip captured pieces
     }
+    if let Some(king_pos) = bit_scan_safe(piece.position) {
+        let mut new_position = game.position.clone();
+        let (new_king_pos, new_rook_pos, old_rook_pos) = match (piece.color, side) {
+            (Color::White, CastlingSide::Kingside) => (6, 5, 7),   // g1, f1, h1
+            (Color::White, CastlingSide::Queenside) => (2, 3, 0),  // c1, d1, a1
+            (Color::Black, CastlingSide::Kingside) => (62, 61, 63),  // g8, f8, h8
+            (Color::Black, CastlingSide::Queenside) => (58, 59, 56),  // c8, d8, a8
+        };
 
-    // Update castling flags
-    match piece.color {
-        Color::White => {
-            new_position.white_king_moved = true;
-            match side {
-                CastlingSide::Kingside => new_position.white_kingside_rook_moved = true,
-                CastlingSide::Queenside => new_position.white_queenside_rook_moved = true,
-            }
-        },
-        Color::Black => {
-            new_position.black_king_moved = true;
-            match side {
-                CastlingSide::Kingside => new_position.black_kingside_rook_moved = true,
-                CastlingSide::Queenside => new_position.black_queenside_rook_moved = true,
-            }
-        },
+        // Move the king
+        let king_piece = new_position.pieces.iter_mut()
+            .find(|p| p.piece_type == PieceType::King && p.color == piece.color)
+            .unwrap();
+        king_piece.position = 1u64 << new_king_pos;
+
+        // Move the rook
+        let rook_piece = new_position.pieces.iter_mut()
+            .find(|p| p.piece_type == PieceType::Rook && p.color == piece.color && p.position == 1u64 << old_rook_pos)
+            .unwrap();
+        rook_piece.position = 1u64 << new_rook_pos;
+
+        // Update occupancy bitboards
+        if piece.color == Color::White {
+            new_position.white_occupancy = new_position.pieces.iter()
+                .filter(|p| p.color == Color::White)
+                .map(|p| p.position)
+                .fold(0, |acc, pos| acc | pos);
+        } else {
+            new_position.black_occupancy = new_position.pieces.iter()
+                .filter(|p| p.color == Color::Black)
+                .map(|p| p.position)
+                .fold(0, |acc, pos| acc | pos);
+        }
+
+        // Update castling flags
+        match piece.color {
+            Color::White => {
+                new_position.white_king_moved = true;
+                match side {
+                    CastlingSide::Kingside => new_position.white_kingside_rook_moved = true,
+                    CastlingSide::Queenside => new_position.white_queenside_rook_moved = true,
+                }
+            },
+            Color::Black => {
+                new_position.black_king_moved = true;
+                match side {
+                    CastlingSide::Kingside => new_position.black_kingside_rook_moved = true,
+                    CastlingSide::Queenside => new_position.black_queenside_rook_moved = true,
+                }
+            },
+        }
+
+        new_positions.push(new_position);
     }
-
-    new_positions.push(new_position);
 }
 
 #[cfg(test)]

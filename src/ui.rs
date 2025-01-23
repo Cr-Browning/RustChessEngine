@@ -2,7 +2,7 @@ use crate::position::{Position, Color, PieceType};
 use crate::search::Search;
 use crate::Game;
 use crate::evaluation::Evaluation;
-use crate::utils::{bit_scan, bit_scan_safe};
+use crate::utils::bit_scan_safe;
 use std::io::{self, Write};
 
 pub struct ChessUI {

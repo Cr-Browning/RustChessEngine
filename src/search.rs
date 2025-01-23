@@ -51,10 +51,11 @@ impl Search {
         let mut best_move = None;
         let mut best_score = MIN_SCORE;
 
+        // Update legal moves before searching
         position.update_all_legal_moves(&self.game);
         let moves = position.get_all_legal_moves(&self.game);
         
-        // Skip pieces that have been captured (position == 0)
+        // Skip pieces that have been captured (position == 0) or belong to wrong color
         let valid_moves: Vec<u64> = moves.into_iter()
             .filter(|&mov| {
                 let from_square = mov & 0x3F;
@@ -62,7 +63,7 @@ impl Search {
                     Square::Empty => false,
                     Square::Occupied(idx) => {
                         let piece = &position.pieces[idx];
-                        piece.position != 0
+                        piece.position != 0 && piece.color == position.active_color
                     }
                 }
             })
@@ -151,7 +152,10 @@ impl Search {
                 let from_square = mov & 0x3F;
                 match position.squares[from_square as usize] {
                     Square::Empty => false,
-                    Square::Occupied(idx) => position.pieces[idx].position != 0
+                    Square::Occupied(idx) => {
+                        let piece = &position.pieces[idx];
+                        piece.position != 0 && piece.color == position.active_color
+                    }
                 }
             })
             .collect();
@@ -292,8 +296,7 @@ mod tests {
         
         // Verify the move is a capture
         if let Some(mov) = best_move {
-            let to_square = (mov >> 6) & 0x3F;
-            assert!(position.squares[to_square as usize] != Square::Empty);
+            assert!(position.is_capture(mov));
         }
     }
 

@@ -4,7 +4,6 @@
 //! and attack patterns. It uses bitboards for efficient move generation and
 //! position evaluation.
 
-use crate::utils::*;
 
 /// A collection of pre-computed lookup tables for chess move generation.
 /// 

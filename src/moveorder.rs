@@ -1,7 +1,9 @@
-use crate::position::{Position, PieceType, Color};
+use crate::position::Position;
 use crate::Game;
-use crate::utils::{bit_scan, extract_bits};
-use crate::evaluation::Evaluation;
+use crate::utils::*;
+use crate::position::*;
+use crate::chess_move::*;
+
 
 // Move scoring constants
 const CAPTURE_SCORE_BASE: i32 = 10000;
@@ -45,28 +47,28 @@ impl MoveOrderer {
 
     fn score_move(&self, position: &Position, mov: u64, _game: &Game) -> i32 {
         let mut score = 0;
+        let from_square = mov & 0x3F;  // Extract from_square from bits 0-5
+        let to_square = (mov >> 6) & 0x3F;  // Extract to_square from bits 6-11
 
-        // Get the moving piece and target square
-        let from_square = 1u64 << (mov & 0x3F);  // Lower 6 bits for from square
-        let to_square = 1u64 << ((mov >> 6) & 0x3F);  // Next 6 bits for to square
-        
-        // Score captures
-        if let Some(captured_piece) = position.get_piece_at(to_square) {
-            if let Some(attacker_type) = position.get_piece_type_at(from_square) {
-                score += CAPTURE_SCORE_BASE + 
-                        PIECE_VALUES[captured_piece as usize] -
-                        (PIECE_VALUES[attacker_type as usize] / 100);
+        // Score promotions first (highest priority)
+        if (mov & (1 << 12)) != 0 {
+            score += 100000;  // Much higher than any capture
+        }
+
+        // Get the moving piece
+        if let Some(piece_idx) = position.squares[from_square as usize].get_piece_index() {
+            let moving_piece = &position.pieces[piece_idx];
+            
+            // Score captures
+            if let Some(target_idx) = position.squares[to_square as usize].get_piece_index() {
+                let target_piece = &position.pieces[target_idx];
+                if target_piece.position != 0 && target_piece.color != moving_piece.color {
+                    // MVV-LVA scoring: Most Valuable Victim - Least Valuable Attacker
+                    let victim_value = PIECE_VALUES[target_piece.piece_type as usize];
+                    let attacker_value = PIECE_VALUES[moving_piece.piece_type as usize];
+                    score += CAPTURE_SCORE_BASE + victim_value - (attacker_value / 100);
+                }
             }
-        }
-
-        // Score promotions
-        if mov & (1 << 12) != 0 { // Promotion flag
-            score += PIECE_VALUES[4]; // Queen value
-        }
-
-        // Score castling moves
-        if mov & (1 << 13) != 0 { // Castle flag
-            score += 50;
         }
 
         score
@@ -88,6 +90,17 @@ mod tests {
         println!("Position:\n{}", position.to_string());
         println!("Active color: {:?}", position.active_color);
         
+        // Print each piece's position and legal moves
+        for (i, piece) in position.pieces.iter().enumerate() {
+            if piece.position == 0 {
+                continue;
+            }
+            println!("Piece {}: {:?} {:?} at square {}, legal moves: {:?}", 
+                i, piece.color, piece.piece_type, 
+                bit_scan_safe(piece.position).unwrap_or(64),
+                extract_bits(position.piece_legal_moves[i]));
+        }
+        
         // Convert bitboards to moves
         let mut moves = Vec::new();
         for (i, legal_moves_bitboard) in position.piece_legal_moves.iter().enumerate() {
@@ -108,12 +121,22 @@ mod tests {
         for mov in &moves {
             let from_sq = mov & 0x3F;
             let to_sq = (mov >> 6) & 0x3F;
-            println!("Move: from square {} to square {}", from_sq, to_sq);
+            println!("Move: from square {} to square {}, is_capture: {}", 
+                from_sq, to_sq, position.is_capture(*mov));
         }
         
         let mut orderer = MoveOrderer::new();
         let ordered_moves = orderer.order_moves(&position, &moves, &game);
         println!("Number of ordered moves: {}", ordered_moves.len());
+
+        // Print scores for each move
+        for mov in &ordered_moves {
+            let from_sq = mov & 0x3F;
+            let to_sq = (mov >> 6) & 0x3F;
+            let score = orderer.score_move(&position, *mov, &game);
+            println!("Move from {} to {}, score: {}, is_capture: {}", 
+                from_sq, to_sq, score, position.is_capture(*mov));
+        }
 
         if !ordered_moves.is_empty() {
             let first_move = ordered_moves[0];
@@ -135,6 +158,8 @@ mod tests {
             &game
         );
         
+        println!("Position:\n{}", position.to_string());
+        
         // Convert bitboards to moves
         let mut moves = Vec::new();
         for (i, legal_moves_bitboard) in position.piece_legal_moves.iter().enumerate() {
@@ -142,6 +167,7 @@ mod tests {
                 continue;
             }
             let piece = &position.pieces[i];
+            println!("Piece at index {}: {:?} {:?} at square {}", i, piece.color, piece.piece_type, bit_scan(piece.position));
             let from_square = bit_scan(piece.position) as u64;
             for to_square in extract_bits(*legal_moves_bitboard) {
                 // Encode move: from_square in lower 6 bits, to_square in next 6 bits
@@ -155,6 +181,7 @@ mod tests {
                         mov |= 1 << 12;  // Set promotion flag
                     }
                 }
+                println!("  Move from {} to {}, promotion: {}", from_square, to_square, mov & (1 << 12) != 0);
                 moves.push(mov);
             }
         }
@@ -165,6 +192,9 @@ mod tests {
         // Verify that promotions are ordered first
         if !ordered_moves.is_empty() {
             let first_move = ordered_moves[0];
+            let from_square = first_move & 0x3F;
+            let to_square = (first_move >> 6) & 0x3F;
+            println!("First move: from {} to {}, promotion: {}", from_square, to_square, first_move & (1 << 12) != 0);
             assert!(position.is_promotion(first_move));
         }
     }

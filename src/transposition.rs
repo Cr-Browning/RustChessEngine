@@ -13,7 +13,7 @@ pub struct TranspositionEntry {
     pub depth: i32,        // Depth searched
     pub flag: NodeType,    // Type of node
     pub value: i32,        // Score of position
-    pub best_move: Option<u64>, // Best move found (encoded as u64)
+    pub best_move: Option<u64>, // Best move found
     pub age: u8,          // Age for replacement strategy
 }
 
@@ -93,7 +93,7 @@ mod tests {
         let depth = 4;
         let flag = NodeType::Exact;
         let value = 100;
-        let best_move = Some(0x1234u64); // Example encoded move
+        let best_move = None;
 
         tt.store(hash, depth, flag, value, best_move);
         let entry = tt.probe(hash).unwrap();
@@ -111,21 +111,19 @@ mod tests {
         let hash = 123456789;
 
         // Store initial entry
-        tt.store(hash, 2, NodeType::Exact, 100, Some(0x1234u64));
+        tt.store(hash, 2, NodeType::Exact, 100, None);
 
         // Store deeper search entry
-        tt.store(hash, 4, NodeType::Exact, 200, Some(0x5678u64));
+        tt.store(hash, 4, NodeType::Exact, 200, None);
         let entry = tt.probe(hash).unwrap();
         assert_eq!(entry.depth, 4);
         assert_eq!(entry.value, 200);
-        assert_eq!(entry.best_move, Some(0x5678u64));
 
         // Try to store shallower search entry
-        tt.store(hash, 1, NodeType::Exact, 300, Some(0x9ABCu64));
+        tt.store(hash, 1, NodeType::Exact, 300, None);
         let entry = tt.probe(hash).unwrap();
         assert_eq!(entry.depth, 4); // Should keep deeper entry
         assert_eq!(entry.value, 200);
-        assert_eq!(entry.best_move, Some(0x5678u64));
     }
 
     #[test]
@@ -133,11 +131,11 @@ mod tests {
         let mut tt = TranspositionTable::new(1);
         let hash = 123456789;
 
-        tt.store(hash, 4, NodeType::Exact, 100, Some(0x1234u64));
+        tt.store(hash, 4, NodeType::Exact, 100, None);
         let initial_age = tt.probe(hash).unwrap().age;
 
         tt.new_search();
-        tt.store(hash, 3, NodeType::Exact, 200, Some(0x5678u64));
+        tt.store(hash, 3, NodeType::Exact, 200, None);
         let new_age = tt.probe(hash).unwrap().age;
 
         assert_ne!(initial_age, new_age);
