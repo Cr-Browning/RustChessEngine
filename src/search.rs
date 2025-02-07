@@ -4,7 +4,7 @@ use crate::Game;
 use std::time::{Instant, Duration};
 use crate::moveorder::MoveOrderer;
 use crate::position::Square;
-use crate::utils::bit_scan_safe;
+use crate::utils::{bit_scan_safe, extract_bits};
 use crate::transposition::{TranspositionTable, NodeType};
 
 const MAX_SCORE: i32 = 100000;
@@ -286,6 +286,24 @@ mod tests {
             "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1",
             &game
         );
+
+        println!("\nInitial position:");
+        println!("{}", position.to_string());
+        println!("Active color: {:?}", position.active_color);
+        
+        // Print each piece's position and legal moves
+        for (i, piece) in position.pieces.iter().enumerate() {
+            if piece.position == 0 {
+                continue;
+            }
+            if piece.color == position.active_color {
+                println!("Piece {}: {:?} {:?} at square {}, legal moves: {:?}", 
+                    i, piece.color, piece.piece_type, 
+                    bit_scan_safe(piece.position).unwrap_or(64),
+                    extract_bits(position.piece_legal_moves[i]));
+            }
+        }
+
         let mut search = Search::new();
         search.set_max_time(1);
         
@@ -294,9 +312,23 @@ mod tests {
         let best_move = search.find_best_move(&mut position);
         assert!(best_move.is_some());
         
+        // Print the chosen move
+        if let Some(mov) = best_move {
+            let from_square = mov & 0x3F;
+            let to_square = (mov >> 6) & 0x3F;
+            println!("\nChosen move: from square {} to square {}", from_square, to_square);
+            println!("Is capture: {}", position.is_capture(mov));
+            
+            // Make the move to visualize the result
+            let mut new_position = position.clone();
+            new_position.make_move(mov);
+            println!("\nPosition after move:");
+            println!("{}", new_position.to_string());
+        }
+        
         // Verify the move is a capture
         if let Some(mov) = best_move {
-            assert!(position.is_capture(mov));
+            assert!(position.is_capture(mov), "Expected a capture move, but got a non-capture move");
         }
     }
 

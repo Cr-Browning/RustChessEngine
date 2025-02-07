@@ -233,7 +233,7 @@ fn generate_bishop_moves(piece: &Piece, game: &Game, own_occupancy: u64, all_occ
         return new_positions;  // Skip captured pieces
     }
     if let Some(square) = bit_scan_safe(piece.position) {
-        let attacks = game.rays.get_bishop_attacks(square, all_occupancy);
+        let attacks = game.rays.get_bishop_attacks(square, all_occupancy, piece.color, own_occupancy);
         let valid_moves = attacks & !own_occupancy;
         
         for target in extract_bits(valid_moves) {

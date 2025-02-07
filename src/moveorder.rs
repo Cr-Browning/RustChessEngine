@@ -50,11 +50,6 @@ impl MoveOrderer {
         let from_square = mov & 0x3F;  // Extract from_square from bits 0-5
         let to_square = (mov >> 6) & 0x3F;  // Extract to_square from bits 6-11
 
-        // Score promotions first (highest priority)
-        if (mov & (1 << 12)) != 0 {
-            score += 100000;  // Much higher than any capture
-        }
-
         // Get the moving piece
         if let Some(piece_idx) = position.squares[from_square as usize].get_piece_index() {
             let moving_piece = &position.pieces[piece_idx];
@@ -68,6 +63,11 @@ impl MoveOrderer {
                     let attacker_value = PIECE_VALUES[moving_piece.piece_type as usize];
                     score += CAPTURE_SCORE_BASE + victim_value - (attacker_value / 100);
                 }
+            }
+            
+            // Score promotions
+            if (mov & (1 << 12)) != 0 {
+                score += 100000;  // Much higher than any capture
             }
         }
 

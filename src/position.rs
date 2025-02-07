@@ -333,18 +333,6 @@ impl Position {
     }
 
     pub fn update_all_legal_moves(&mut self, game: &Game) {
-        // Define castling paths
-        let white_kingside_path = 0x60;  // f1 and g1
-        let white_queenside_path = 0xE;  // b1, c1, and d1
-        let black_kingside_path = 0x6000000000000000;  // f8 and g8
-        let black_queenside_path = 0xE00000000000000;  // b8, c8, and d8
-
-        // Reset castling path flags
-        self.white_kingside_path_attacked = false;
-        self.white_queenside_path_attacked = false;
-        self.black_kingside_path_attacked = false;
-        self.black_queenside_path_attacked = false;
-
         // Clear and resize the legal moves vector
         self.piece_legal_moves.clear();
         self.piece_legal_moves.resize(self.pieces.len(), 0);
@@ -417,24 +405,23 @@ impl Position {
                     PieceType::Knight => {
                         let attacks = game.move_gen_tables.knight_attacks[square];
                         // Allow moves to empty squares or squares with opponent pieces
-                        attacks & !own_occupancy & ((!all_occupancy) | opponent_occupancy)
+                        attacks & !own_occupancy
                     },
                     PieceType::Bishop => {
-                        let attacks = game.rays.get_bishop_attacks(square, all_occupancy);
+                        let attacks = game.rays.get_bishop_attacks(square, all_occupancy, piece.color, 0);
                         // Allow moves to empty squares or squares with opponent pieces
-                        attacks & !own_occupancy & ((!all_occupancy) | opponent_occupancy)
+                        attacks & !own_occupancy
                     },
                     PieceType::Rook => {
                         let attacks = game.rays.get_rook_attacks(square, all_occupancy);
                         // Allow moves to empty squares or squares with opponent pieces
-                        attacks & !own_occupancy & ((!all_occupancy) | opponent_occupancy)
+                        attacks & !own_occupancy
                     },
                     PieceType::Queen => {
-                        let bishop_attacks = game.rays.get_bishop_attacks(square, all_occupancy);
+                        let bishop_attacks = game.rays.get_bishop_attacks(square, all_occupancy, piece.color, 0);
                         let rook_attacks = game.rays.get_rook_attacks(square, all_occupancy);
-                        let attacks = bishop_attacks | rook_attacks;
                         // Allow moves to empty squares or squares with opponent pieces
-                        attacks & !own_occupancy & ((!all_occupancy) | opponent_occupancy)
+                        (bishop_attacks | rook_attacks) & !own_occupancy
                     },
                     PieceType::King => {
                         let attacks = game.move_gen_tables.king_attacks[square];
@@ -486,58 +473,11 @@ impl Position {
                         legal_moves |= to_bitboard;
                     }
                     
-                    // Restore the original active color
+                    // Restore active color
                     test_position.active_color = original_active_color;
                 }
-
-                // Store the legal moves for this piece
+                
                 self.piece_legal_moves[i] = legal_moves;
-            }
-        }
-
-        // Second pass: Check attacks on castling paths
-        for piece in self.pieces.iter() {
-            if piece.position == 0 {
-                continue;  // Skip captured pieces
-            }
-            if let Some(square) = bit_scan_safe(piece.position) {
-                // Calculate attack squares based on piece type
-                let attack_squares = match piece.piece_type {
-                    PieceType::Pawn => {
-                        if piece.color == Color::White {
-                            game.pawn_attacks.white_diagonal_moves[square]
-                        } else {
-                            game.pawn_attacks.black_diagonal_moves[square]
-                        }
-                    },
-                    PieceType::Knight => game.move_gen_tables.knight_attacks[square],
-                    PieceType::Bishop => game.rays.get_bishop_attacks(square, all_occupancy),
-                    PieceType::Rook => game.rays.get_rook_attacks(square, all_occupancy),
-                    PieceType::Queen => {
-                        game.rays.get_bishop_attacks(square, all_occupancy) | 
-                        game.rays.get_rook_attacks(square, all_occupancy)
-                    },
-                    PieceType::King => game.move_gen_tables.king_attacks[square],
-                };
-
-                // White pieces attack black's castling paths
-                if piece.color == Color::White {
-                    if (attack_squares & black_kingside_path) != 0 {
-                        self.black_kingside_path_attacked = true;
-                    }
-                    if (attack_squares & black_queenside_path) != 0 {
-                        self.black_queenside_path_attacked = true;
-                    }
-                }
-                // Black pieces attack white's castling paths
-                else {
-                    if (attack_squares & white_kingside_path) != 0 {
-                        self.white_kingside_path_attacked = true;
-                    }
-                    if (attack_squares & white_queenside_path) != 0 {
-                        self.white_queenside_path_attacked = true;
-                    }
-                }
             }
         }
     }
@@ -758,10 +698,10 @@ impl Position {
                                 }
                             },
                             PieceType::Knight => game.move_gen_tables.knight_attacks[piece_square],
-                            PieceType::Bishop => game.rays.get_bishop_attacks(piece_square, all_occupancy),
+                            PieceType::Bishop => game.rays.get_bishop_attacks(piece_square, all_occupancy, piece.color, 0),
                             PieceType::Rook => game.rays.get_rook_attacks(piece_square, all_occupancy),
                             PieceType::Queen => {
-                                game.rays.get_bishop_attacks(piece_square, all_occupancy) | 
+                                game.rays.get_bishop_attacks(piece_square, all_occupancy, piece.color, 0) | 
                                 game.rays.get_rook_attacks(piece_square, all_occupancy)
                             },
                             PieceType::King => game.move_gen_tables.king_attacks[piece_square],
